@@ -1,42 +1,40 @@
-# FOMO25 NGC Competition Server
+# FOMO Evaluation System
 
-Official competition server for processing FOMO25 challenge submissions.
+A robust evaluation system for medical imaging tasks using Singularity containers.
+
+## Features
+
+- **Task 1**: Infarct classification (AUROC metric)
+- **Task 2**: Meningioma segmentation (DSC, NSD metrics)
+- **Task 3**: Brain age prediction (Absolute Error, Correlation metrics)
 
 ## Architecture
 
-- Receives containers via SFTP
-- Validates and runs containers in secure environment
-- Computes metrics against private ground truth data
-- Sends results back via SFTP
+```
+src/
+├── main.py              # Main orchestration script
+├── config/              # Configuration management
+├── tasks/               # Task-specific implementations
+├── metrics/             # Metric computation modules
+├── runners/             # Container execution
+└── utils/               # Utility functions
+```
 
-## Setup
+## Usage
 
-1. Run as root: `bash setup_environment.sh`
-2. Place private data in `/data/fomo25/private_data/`
-3. Configure SFTP keys in `/data/fomo25/config/`
-4. Start services:
-   ```bash
-   systemctl start ngc-server
-   systemctl start sftp-receiver
-   ```
+1. Install dependencies: `pip install -r requirements.txt`
+2. Place containers in `/submissions/incoming/` with format: `entity_id_taskX.sif`
+3. Run evaluation: `python src/main.py`
 
-## Security Features
+## Container Requirements
 
-- Containers run with `--contain` and `--network none`
-- Read-only access to test data
-- No home directory access
-- Runs as unprivileged user (uid 65534)
-- 1-hour timeout per evaluation
+Containers must:
+- Accept `--input` and `--output` parameters
+- Implement `/app/predict.py` script
+- Support required modality flags (--flair, --adc, etc.)
 
-## Directory Structure
+## Output
 
-- `incoming/`: New submissions from SFTP
-- `processing/`: Currently being evaluated
-- `processed/`: Completed evaluations
-- `private_data/`: Ground truth data (by task type)
-- `results/`: Computed metrics
-- `logs/`: System and evaluation logs
-
-## Monitoring
-
-Run `./scripts/monitor_system.sh` to view real-time status.
+- Results saved as JSON in `/results/`
+- Containers moved to `/submissions/evaluated/`
+- Logs available in `logs/` directory
