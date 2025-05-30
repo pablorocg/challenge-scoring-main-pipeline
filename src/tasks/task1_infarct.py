@@ -1,5 +1,6 @@
 """Task 1: Infarct Classification."""
 
+import pandas as pd
 from pathlib import Path
 from typing import Dict, Any
 
@@ -21,11 +22,11 @@ class InfarctClassificationTask(BaseTask):
     
     @property
     def output_extension(self) -> str:
-        return ".txt"
+        return ".csv"
     
     @property
     def image_modalities(self) -> list[str]:
-        return ["flair", "adc", "dwi_b1000", "t2s_or_swi"]
+        return ["modality"]
     
     def evaluate(self, output_path: Path) -> Dict[str, Any]:
         """Evaluate classification predictions."""
@@ -48,18 +49,19 @@ class InfarctClassificationTask(BaseTask):
         }
     
     def _load_predictions(self, output_path: Path) -> list[float]:
-        """Load prediction scores from output file."""
-        predictions = []
+        """Load prediction scores from CSV file."""
         try:
-            with open(output_path, 'r') as f:
-                for line in f:
-                    line = line.strip()
-                    if line:
-                        predictions.append(float(line))
-        except (ValueError, IOError):
+            df = pd.read_csv(output_path)
+            # Expected format: header,prob_class_1
+            if 'prob_class_1' in df.columns:
+                return df['prob_class_1'].tolist()
+            elif len(df.columns) >= 2:
+                # Use second column if prob_class_1 not found
+                return df.iloc[:, 1].tolist()
+            else:
+                return []
+        except Exception:
             return []
-        
-        return predictions
     
     def _load_ground_truth(self) -> list[int]:
         """Load ground truth labels."""

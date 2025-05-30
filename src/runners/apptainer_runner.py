@@ -1,4 +1,4 @@
-"""Singularity container runner."""
+"""Apptainer container runner."""
 
 import subprocess
 from pathlib import Path
@@ -14,7 +14,7 @@ class ApptainerRunner:
         self.logger = get_logger(__name__)
     
     def run_inference(self, container_path: Path, task, output_path: Path) -> bool:
-        """Run inference using a Apptainer container."""
+        """Run inference using an Apptainer container."""
         self.logger.info(f"Running inference with {container_path}")
         
         # Prepare command
@@ -29,7 +29,7 @@ class ApptainerRunner:
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=3600  # 1 hour timeout
+                timeout=SETTINGS.CONTAINER_TIMEOUT
             )
             
             if result.returncode == 0:
@@ -47,24 +47,17 @@ class ApptainerRunner:
             return False
     
     def _build_command(self, container_path: Path, task, output_path: Path) -> list[str]:
-        """Build Singularity command."""
+        """Build Apptainer command."""
         cmd = [
             SETTINGS.APPTAINER_EXECUTABLE,
             "exec",
             "--bind", f"{SETTINGS.INPUT_DIR}:/input:ro",
             "--bind", f"{SETTINGS.OUTPUT_DIR}:/output:rw",
             str(container_path),
-            "python", SETTINGS.PYTHON_SCRIPT
-        ]
-        
-        # Add modality arguments
-        for modality in task.image_modalities:
-            cmd.extend([f"--{modality}"])
-        
-        # Add input and output paths
-        cmd.extend([
+            "python", SETTINGS.PYTHON_SCRIPT,
+            "--modality",
             "--input", "/input",
             "--output", f"/output/{output_path.name}"
-        ])
+        ]
         
         return cmd

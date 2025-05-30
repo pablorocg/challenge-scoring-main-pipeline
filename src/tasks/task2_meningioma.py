@@ -25,7 +25,7 @@ class MeningiomaSegmentationTask(BaseTask):
     
     @property
     def image_modalities(self) -> list[str]:
-        return ["flair", "dwi_b1000", "t2s_or_swi"]
+        return ["modality"]
     
     def evaluate(self, output_path: Path) -> Dict[str, Any]:
         """Evaluate segmentation predictions."""
@@ -77,4 +77,6 @@ class MeningiomaSegmentationTask(BaseTask):
     def _load_ground_truth_segmentation(self):
         """Load ground truth segmentation."""
         # Currently empty labels - return None for now
+        # When available, segmentations will be in:
+        # self.data_dir / "labels" / subject_id / "seg.nii.gz"
         return None

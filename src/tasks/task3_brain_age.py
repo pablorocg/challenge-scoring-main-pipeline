@@ -1,5 +1,6 @@
 """Task 3: Brain Age Prediction."""
 
+import pandas as pd
 from pathlib import Path
 from typing import Dict, Any
 
@@ -21,11 +22,11 @@ class BrainAgePredictionTask(BaseTask):
     
     @property
     def output_extension(self) -> str:
-        return ".txt"
+        return ".csv"
     
     @property
     def image_modalities(self) -> list[str]:
-        return ["t1", "t2"]
+        return ["modality"]
     
     def evaluate(self, output_path: Path) -> Dict[str, Any]:
         """Evaluate age predictions."""
@@ -56,18 +57,19 @@ class BrainAgePredictionTask(BaseTask):
         }
     
     def _load_predictions(self, output_path: Path) -> list[float]:
-        """Load age predictions from output file."""
-        predictions = []
+        """Load age predictions from CSV file."""
         try:
-            with open(output_path, 'r') as f:
-                for line in f:
-                    line = line.strip()
-                    if line:
-                        predictions.append(float(line))
-        except (ValueError, IOError):
+            df = pd.read_csv(output_path)
+            # Expected format: header,value
+            if 'value' in df.columns:
+                return df['value'].tolist()
+            elif len(df.columns) >= 2:
+                # Use second column if value not found
+                return df.iloc[:, 1].tolist()
+            else:
+                return []
+        except Exception:
             return []
-        
-        return predictions
     
     def _load_ground_truth(self) -> list[float]:
         """Load ground truth ages."""
