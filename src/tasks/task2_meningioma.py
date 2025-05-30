@@ -3,9 +3,9 @@
 from pathlib import Path
 from typing import Dict, Any
 
-from .base_task import BaseTask
-from config.settings import SETTINGS
-from metrics.segmentation import compute_dice, compute_nsd
+from src.tasks.base_task import BaseTask
+from src.config.settings import SETTINGS
+from src.metrics.segmentation import compute_dice, compute_nsd
 
 
 class MeningiomaSegmentationTask(BaseTask):
@@ -25,7 +25,7 @@ class MeningiomaSegmentationTask(BaseTask):
     
     @property
     def image_modalities(self) -> list[str]:
-        return ["modality"]
+        return ["flair", "dwi_b1000", "t2s_or_swi"]
     
     def evaluate(self, output_path: Path) -> Dict[str, Any]:
         """Evaluate segmentation predictions."""

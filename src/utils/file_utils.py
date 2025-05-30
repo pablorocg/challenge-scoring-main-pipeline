@@ -4,7 +4,7 @@ import shutil
 from pathlib import Path
 from typing import List
 
-from utils.logging_utils import get_logger
+from src.utils.logging_utils import get_logger
 
 
 def find_containers(directory: Path) -> List[Path]:
@@ -32,7 +32,7 @@ def move_container(container_path: Path, destination_dir: Path):
 
 def ensure_directories():
     """Ensure all required directories exist."""
-    from config.settings import SETTINGS
+    from src.config.settings import SETTINGS
     
     directories = [
         SETTINGS.INCOMING_DIR,
