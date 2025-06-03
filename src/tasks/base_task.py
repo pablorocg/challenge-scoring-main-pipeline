@@ -1,4 +1,5 @@
-"""Base class for evaluation tasks."""
+# src/tasks/base_task.py
+"""Simplified base class for evaluation tasks."""
 
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -24,12 +25,6 @@ class BaseTask(ABC):
     @abstractmethod
     def output_extension(self) -> str:
         """Expected output file extension."""
-        pass
-    
-    @property
-    @abstractmethod
-    def image_modalities(self) -> list[str]:
-        """Required image modalities."""
         pass
     
     @abstractmethod

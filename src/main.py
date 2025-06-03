@@ -1,10 +1,5 @@
-#!/usr/bin/env python3
-"""
-FOMO Evaluation System - Main Entry Point
-Orchestrates the evaluation of medical imaging tasks using Apptainer containers.
-"""
+"""FOMO Evaluation System - Simplified main entry point."""
 
-import sys
 import json
 from pathlib import Path
 from datetime import datetime
@@ -12,16 +7,19 @@ from datetime import datetime
 from config.settings import SETTINGS
 from tasks import TaskFactory
 from runners.apptainer_runner import ApptainerRunner
-from utils.file_utils import find_containers, move_container
-from utils.logging_utils import setup_logging, get_logger
+from utils.file_utils import find_containers, move_container, ensure_directories
+from utils.logging_utils import setup_logging
 
 
 def main():
-    """Main evaluation orchestration."""
+    """Main evaluation orchestration - simplified."""
     logger = setup_logging()
     logger.info("Starting FOMO evaluation system")
     
-    runner = ApptainerRunner()
+    # Ensure directories exist
+    ensure_directories()
+    
+    # Find containers to process
     containers = find_containers(SETTINGS.INCOMING_DIR)
     
     if not containers:
@@ -30,48 +28,42 @@ def main():
     
     logger.info(f"Found {len(containers)} containers to evaluate")
     
+    # Process each container
+    runner = ApptainerRunner()
+    
     for container_path in containers:
-        try:
-            evaluate_container(container_path, runner, logger)
-        except Exception as e:
-            logger.error(f"Failed to evaluate {container_path}: {e}")
-            continue
+        process_container(container_path, runner, logger)
     
     logger.info("Evaluation completed")
 
 
-def evaluate_container(container_path: Path, runner: ApptainerRunner, logger):
-    """Evaluate a single container."""
+def process_container(container_path: Path, runner: ApptainerRunner, logger):
+    """Process a single container."""
     entity_id, task_id = parse_container_name(container_path.name)
-    logger.info(f"Evaluating {entity_id} for {task_id}")
+    logger.info(f"Processing {entity_id} for {task_id}")
     
-    # Get task configuration
+    # Get task and create output directory
     task = TaskFactory.create_task(task_id)
-    
-    # Create organized output directory: /output/task1/entity_id/
     task_output_dir = SETTINGS.OUTPUT_DIR / task_id / entity_id
     task_output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Set output path in the organized directory
+    # Set final output path
     output_path = task_output_dir / f"{entity_id}_{task_id}_output{task.output_extension}"
     
-    # Run inference with organized output directory
-    success = runner.run_inference(container_path, task, output_path, task_output_dir)
-    
-    if not success:
-        logger.error(f"Inference failed for {container_path}")
-        return
-    
-    # Compute metrics
-    results = task.evaluate(output_path, task_output_dir)
-    
-    # Save results
-    save_results(entity_id, task_id, results, task_output_dir)
-    
-    # Move container to evaluated
-    move_container(container_path, SETTINGS.EVALUATED_DIR)
-    
-    logger.info(f"Completed evaluation for {entity_id}_{task_id}")
+    # Run inference
+    if runner.run_inference(container_path, task, output_path, task_output_dir):
+        # Evaluate results
+        results = task.evaluate(output_path, task_output_dir)
+        
+        # Save results
+        save_results(entity_id, task_id, results, task_output_dir)
+        
+        # Move container to evaluated
+        move_container(container_path, SETTINGS.EVALUATED_DIR)
+        
+        logger.info(f"Completed {entity_id}_{task_id}")
+    else:
+        logger.error(f"Failed to process {entity_id}_{task_id}")
 
 
 def parse_container_name(filename: str) -> tuple[str, str]:
@@ -80,7 +72,7 @@ def parse_container_name(filename: str) -> tuple[str, str]:
     parts = name.split('_')
     
     if len(parts) < 2 or not parts[-1].startswith('task'):
-        raise ValueError(f"Invalid container filename format: {filename}")
+        raise ValueError(f"Invalid container filename: {filename}")
     
     task_id = parts[-1]
     entity_id = '_'.join(parts[:-1])
@@ -89,23 +81,23 @@ def parse_container_name(filename: str) -> tuple[str, str]:
 
 
 def save_results(entity_id: str, task_id: str, results: dict, task_output_dir: Path):
-    """Save evaluation results to JSON file in organized directory."""
-    timestamp = datetime.now().isoformat()
+    """Save evaluation results."""
     result_data = {
         'entity_id': entity_id,
         'task_id': task_id,
-        'timestamp': timestamp,
+        'timestamp': datetime.now().isoformat(),
         'container_name': f"{entity_id}_{task_id}.sif",
         'results': results
     }
     
-    # Save results in the task output directory
+    # Save in task output directory
     result_file = task_output_dir / f"{entity_id}_{task_id}_results.json"
     with open(result_file, 'w') as f:
         json.dump(result_data, f, indent=2)
     
-    # Also save in main results directory for backwards compatibility
+    # Also save in main results directory (backwards compatibility)
     main_result_file = SETTINGS.RESULTS_DIR / f"{entity_id}_{task_id}.json"
+    main_result_file.parent.mkdir(parents=True, exist_ok=True)
     with open(main_result_file, 'w') as f:
         json.dump(result_data, f, indent=2)
 
