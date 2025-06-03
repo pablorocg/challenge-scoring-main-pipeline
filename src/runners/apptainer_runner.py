@@ -1,8 +1,9 @@
 # src/runners/apptainer_runner.py
-"""Apptainer container runner with instance support."""
+"""Apptainer container runner with subject-by-subject processing."""
 
 import subprocess
 import time
+import re
 from pathlib import Path
 from typing import List, Tuple
 from contextlib import contextmanager
@@ -12,96 +13,148 @@ from src.utils.logging_utils import get_logger
 
 
 class ApptainerRunner:
-    """Runs inference using Apptainer container instances."""
+    """Runs inference using Apptainer container instances - one per subject."""
     
     def __init__(self):
         self.logger = get_logger(__name__)
     
     def run_inference(self, container_path: Path, task, output_path: Path) -> bool:
-        """Run inference using an Apptainer container instance for all modalities."""
+        """Run inference by processing each subject individually."""
         self.logger.info(f"Running inference with {container_path}")
         
-        # Get all input files for this task
-        input_files = self._get_input_files(task)
+        # Get all subjects for this task
+        subject_dirs = task.get_subject_dirs()
         
-        if not input_files:
-            self.logger.error("No input files found for task")
+        if not subject_dirs:
+            self.logger.error("No subject directories found for task")
             return False
         
-        # Create instance name based on container and timestamp
-        instance_name = f"fomo_{container_path.stem}_{int(time.time())}"
+        all_outputs = []
+        success_count = 0
         
-        # Use context manager for instance lifecycle
+        # Process each subject individually
+        for subject_dir in subject_dirs:
+            self.logger.info(f"🔄 Processing subject: {subject_dir.name}")
+            
+            # Get modalities for this specific subject
+            subject_modalities = self._get_subject_modalities(subject_dir, task)
+            
+            if not subject_modalities:
+                self.logger.warning(f"⚠️ No valid modalities found for {subject_dir.name}")
+                continue
+            
+            # Process this subject
+            subject_outputs = []
+            if self._process_subject(container_path, subject_dir, subject_modalities, 
+                                   output_path, subject_outputs):
+                all_outputs.extend(subject_outputs)
+                success_count += 1
+                self.logger.info(f"✅ Successfully processed {subject_dir.name}")
+            else:
+                self.logger.error(f"❌ Failed to process {subject_dir.name}")
+        
+        # Aggregate all results
+        if success_count > 0:
+            result = self._aggregate_all_outputs(all_outputs, output_path, task)
+            self.logger.info(f"📊 Processing Summary: {success_count}/{len(subject_dirs)} subjects successful")
+            return result
+        
+        self.logger.error("All subject processing failed")
+        return False
+    
+    def _get_subject_modalities(self, subject_dir: Path, task) -> List[Tuple[Path, str]]:
+        """Get available modalities for a specific subject."""
+        ses_dir = subject_dir / "ses_1"
+        if not ses_dir.exists():
+            return []
+        
+        modalities = []
+        
+        # Handle standard modalities
+        for modality in task.image_modalities:
+            if modality in ["t2s", "swi"]:
+                # Handle t2s/swi either/or logic
+                t2s_file = ses_dir / "t2s.nii.gz"
+                swi_file = ses_dir / "swi.nii.gz"
+                
+                if t2s_file.exists():
+                    modalities.append((t2s_file, "t2s"))
+                elif swi_file.exists():
+                    modalities.append((swi_file, "swi"))
+                # If neither exists, skip (don't add anything)
+                
+            elif modality not in ["t2s", "swi"]:
+                # Standard modalities (flair, adc, dwi_b1000, t1, t2)
+                modality_file = ses_dir / f"{modality}.nii.gz"
+                if modality_file.exists():
+                    modalities.append((modality_file, modality))
+        
+        return modalities
+    
+    def _process_subject(self, container_path: Path, subject_dir: Path, 
+                        modalities: List[Tuple[Path, str]], output_path: Path,
+                        subject_outputs: List[Path]) -> bool:
+        """Process a single subject with its own container instance."""
+        
+        # Create unique instance name for this subject
+        instance_name = f"fomo_{container_path.stem}_{subject_dir.name}_{int(time.time())}"
+        
         try:
-            with self._container_instance(container_path, input_files, output_path, instance_name) as instance:
+            with self._container_instance(container_path, subject_dir, instance_name) as instance:
                 if not instance:
                     return False
                 
-                # Run inference for each modality/file combination
-                all_outputs = []
-                success_count = 0
-                
-                for input_file, modality in input_files:
-                    self.logger.info(f"Processing {modality}: {input_file}")
+                # Process each modality for this subject
+                for modality_file, modality in modalities:
+                    self.logger.info(f"  🔍 Processing {modality}: {modality_file.name}")
                     
-                    # Create individual output file for this modality
-                    modality_output = output_path.parent / f"{output_path.stem}_{modality}{output_path.suffix}"
+                    # Create output file for this modality
+                    modality_output = output_path.parent / f"{output_path.stem}_{subject_dir.name}_{modality}{output_path.suffix}"
                     
                     # Run inference on this file using the instance
-                    if self._run_instance_inference(instance_name, modality, input_file, modality_output):
-                        all_outputs.append(modality_output)
-                        success_count += 1
-                        self.logger.info(f"✅ Successfully processed {modality}: {input_file}")
+                    if self._run_instance_inference(instance_name, modality, modality_file, modality_output):
+                        subject_outputs.append(modality_output)
+                        self.logger.info(f"    ✅ {modality} processed successfully")
                     else:
-                        self.logger.error(f"❌ Failed to process {modality}: {input_file}")
+                        self.logger.error(f"    ❌ {modality} processing failed")
+                        return False
                 
-                # Aggregate results if needed
-                if success_count > 0:
-                    result = self._aggregate_outputs(all_outputs, output_path, task)
-                    self.logger.info(f"Processing Summary: {success_count}/{len(input_files)} files successful")
-                    return result
-                
-                self.logger.error("All inference attempts failed")
-                return False
+                return True
                 
         except Exception as e:
-            self.logger.error(f"Error during inference: {e}")
+            self.logger.error(f"Error processing subject {subject_dir.name}: {e}")
             return False
     
     @contextmanager
-    def _container_instance(self, container_path: Path, input_files: List[Tuple[Path, str]], 
-                           output_path: Path, instance_name: str):
-        """Context manager for container instance lifecycle."""
+    def _container_instance(self, container_path: Path, subject_dir: Path, instance_name: str):
+        """Context manager for single-subject container instance."""
         instance = None
         try:
-            # Determine unique input and output directories for binding
-            input_dirs = set(input_file.parent for input_file, _ in input_files)
-            output_dir = output_path.parent
+            # Start container instance for this subject
+            self.logger.info(f"🚀 Starting instance for {subject_dir.name}: {instance_name}")
             
-            # Start container instance
-            self.logger.info(f"🚀 Starting container instance: {instance_name}")
-            
-            if self._start_instance(container_path, input_dirs, output_dir, instance_name):
-                self.logger.info(f"✅ Container instance started successfully")
+            if self._start_subject_instance(container_path, subject_dir, instance_name):
+                self.logger.info(f"✅ Instance started for {subject_dir.name}")
                 instance = instance_name
                 yield instance
             else:
-                self.logger.error(f"❌ Failed to start container instance")
+                self.logger.error(f"❌ Failed to start instance for {subject_dir.name}")
                 yield None
                 
         finally:
-            # Cleanup: stop instance
             if instance:
                 self._stop_instance(instance_name)
     
-    def _start_instance(self, container_path: Path, input_dirs: set, output_dir: Path, 
-                       instance_name: str) -> bool:
-        """Start container instance with appropriate binds."""
+    def _start_subject_instance(self, container_path: Path, subject_dir: Path, instance_name: str) -> bool:
+        """Start container instance for a single subject."""
         try:
+            ses_dir = subject_dir / "ses_1"
+            output_dir = SETTINGS.OUTPUT_DIR
+            
             # Ensure output directory exists
             output_dir.mkdir(parents=True, exist_ok=True)
             
-            # Build command with all necessary binds
+            # Build command with subject-specific binds
             cmd = [
                 SETTINGS.APPTAINER_EXECUTABLE,
                 "instance", "start"
@@ -111,27 +164,25 @@ class ApptainerRunner:
             if SETTINGS.ENABLE_GPU:
                 cmd.append("--nv")
             
-            # Add bind mounts for all input directories (read-only)
-            for input_dir in input_dirs:
-                cmd.extend(["--bind", f"{input_dir}:/input/{input_dir.name}:ro"])
+            # Bind THIS subject's session directory to /input
+            cmd.extend(["--bind", f"{ses_dir}:/input:ro"])
             
-            # Add bind mount for output directory (read-write)
+            # Bind output directory
             cmd.extend(["--bind", f"{output_dir}:/output:rw"])
             
-            # Add container path and instance name
+            # Add container and instance name
             cmd.extend([str(container_path), instance_name])
             
-            self.logger.info(f"Starting instance command: {' '.join(cmd)}")
+            self.logger.info(f"Instance command: {' '.join(cmd)}")
             
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=SETTINGS.INSTANCE_START_TIMEOUT  # Use configured timeout
+                timeout=SETTINGS.INSTANCE_START_TIMEOUT
             )
             
             if result.returncode == 0:
-                # Verify instance is running
                 return self._verify_instance_running(instance_name)
             else:
                 self.logger.error(f"Failed to start instance: {result.stderr}")
@@ -156,7 +207,7 @@ class ApptainerRunner:
     def _stop_instance(self, instance_name: str):
         """Stop container instance."""
         try:
-            self.logger.info(f"🛑 Stopping container instance: {instance_name}")
+            self.logger.info(f"🛑 Stopping instance: {instance_name}")
             cmd = [SETTINGS.APPTAINER_EXECUTABLE, "instance", "stop", instance_name]
             
             result = subprocess.run(
@@ -167,7 +218,7 @@ class ApptainerRunner:
             )
             
             if result.returncode == 0:
-                self.logger.info(f"✅ Container instance stopped successfully")
+                self.logger.info(f"✅ Instance stopped successfully")
             else:
                 self.logger.warning(f"⚠️ Failed to stop instance cleanly: {result.stderr}")
                 
@@ -178,18 +229,18 @@ class ApptainerRunner:
                                input_file: Path, output_file: Path) -> bool:
         """Run inference using container instance."""
         try:
-            # Build command for this specific inference
+            # Build command - input file is now directly in /input/
             cmd = [
                 SETTINGS.APPTAINER_EXECUTABLE,
                 "exec",
                 f"instance://{instance_name}",
                 "python", SETTINGS.PYTHON_SCRIPT,
-                f"--{modality}",  # Use specific modality flag
-                "--input", f"/input/{input_file.parent.name}/{input_file.name}",
+                f"--{modality}",
+                "--input", f"/input/{input_file.name}",  # File is directly in /input/
                 "--output", f"/output/{output_file.name}"
             ]
             
-            self.logger.info(f"⏳ Running inference command: {' '.join(cmd)}")
+            self.logger.info(f"⏳ Inference command: {' '.join(cmd)}")
             
             result = subprocess.run(
                 cmd,
@@ -199,11 +250,10 @@ class ApptainerRunner:
             )
             
             if result.returncode == 0:
-                # Verify output was created
                 if output_file.exists():
                     return True
                 else:
-                    self.logger.error(f"Inference completed but no output file created: {output_file}")
+                    self.logger.error(f"Inference completed but no output file: {output_file}")
                     return False
             else:
                 self.logger.error(f"Inference failed: {result.stderr}")
@@ -218,142 +268,212 @@ class ApptainerRunner:
             self.logger.error(f"Error running inference: {e}")
             return False
     
-    def _get_input_files(self, task) -> List[Tuple[Path, str]]:
-        """Get list of (file_path, modality) tuples for the task."""
-        input_files = []
-        
-        # Get all subject directories for this task
-        subject_dirs = task.get_subject_dirs()
-        
-        for subject_dir in subject_dirs:
-            ses_dir = subject_dir / "ses_1"
-            if not ses_dir.exists():
-                continue
-            
-            # Find files for each modality
-            for modality in task.image_modalities:
-                if modality == "t2s" or modality == "swi":  # Handle optional modalities
-                    # Try t2s first, then swi
-                    t2s_file = ses_dir / "t2s.nii.gz"
-                    swi_file = ses_dir / "swi.nii.gz"
-                    
-                    if t2s_file.exists():
-                        input_files.append((t2s_file, "t2s"))
-                    elif swi_file.exists():
-                        input_files.append((swi_file, "swi"))
-                else:
-                    # Standard modality files
-                    modality_file = ses_dir / f"{modality}.nii.gz"
-                    if modality_file.exists():
-                        input_files.append((modality_file, modality))
-        
-        return input_files
-    
-    def _aggregate_outputs(self, modality_outputs: List[Path], final_output: Path, task) -> bool:
-        """Aggregate multiple modality outputs into final result."""
+    def _aggregate_all_outputs(self, all_outputs: List[Path], final_output: Path, task) -> bool:
+        """Combine outputs from all subjects and modalities (no aggregation - keep all cases)."""
         try:
             if task.name == "Infarct Classification":
-                # For classification: average probabilities across modalities
-                return self._aggregate_classification_outputs(modality_outputs, final_output)
-            
+                return self._combine_classification_outputs(all_outputs, final_output)
             elif task.name == "Brain Age Prediction":
-                # For age prediction: average ages across modalities
-                return self._aggregate_regression_outputs(modality_outputs, final_output)
-            
+                return self._combine_regression_outputs(all_outputs, final_output)
             elif task.name == "Meningioma Segmentation":
-                # For segmentation: use the best available output
-                return self._aggregate_segmentation_outputs(modality_outputs, final_output)
-            
+                return self._aggregate_segmentation_outputs(all_outputs, final_output)
             else:
-                # Unknown task: just use first output
-                if modality_outputs:
+                # Default: use first output
+                if all_outputs:
                     import shutil
-                    shutil.copy(modality_outputs[0], final_output)
+                    shutil.copy(all_outputs[0], final_output)
                     return True
                 return False
                 
         except Exception as e:
-            self.logger.error(f"Error aggregating outputs: {e}")
+            self.logger.error(f"Error combining outputs: {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
             return False
     
-    def _aggregate_classification_outputs(self, outputs: List[Path], final_output: Path) -> bool:
-        """Aggregate classification probabilities."""
+    def _combine_classification_outputs(self, outputs: List[Path], final_output: Path) -> bool:
+        """Combine classification outputs - keep all modalities as separate cases."""
         import pandas as pd
-        import numpy as np
         
-        all_probs = []
-        headers = []
+        all_predictions = []
         
         for output_file in outputs:
             try:
+                # Extract subject ID from the output filename
+                subject_id = self._extract_subject_from_filename(output_file.name)
+                # Extract modality from filename
+                modality = self._extract_modality_from_filename(output_file.name)
+                
+                if not subject_id:
+                    self.logger.warning(f"Could not extract subject ID from filename: {output_file.name}")
+                    continue
+                
+                # Load the CSV
                 df = pd.read_csv(output_file)
-                if 'prob_class_1' in df.columns:
-                    all_probs.extend(df['prob_class_1'].tolist())
-                    headers.extend(df['header'].tolist())
+                if 'prob_class_1' not in df.columns:
+                    self.logger.warning(f"No prob_class_1 column in {output_file.name}")
+                    continue
+                
+                # Get the probability (assuming single row per file)
+                if len(df) > 0:
+                    prob = float(df['prob_class_1'].iloc[0])
+                    
+                    # Create unique header for this modality case
+                    header = f"{subject_id}_{modality}" if modality else subject_id
+                    
+                    all_predictions.append({
+                        'header': header,
+                        'prob_class_1': prob
+                    })
+                    
+                    self.logger.debug(f"Added prediction: {header} -> {prob}")
+                
             except Exception as e:
                 self.logger.warning(f"Could not read {output_file}: {e}")
                 continue
         
-        if all_probs:
-            # Average probabilities per subject
-            unique_headers = list(set(headers))
-            averaged_probs = []
+        if all_predictions:
+            # Create final DataFrame with ALL modalities as separate cases
+            final_df = pd.DataFrame(all_predictions)
             
-            for header in unique_headers:
-                header_probs = [prob for h, prob in zip(headers, all_probs) if h == header]
-                avg_prob = np.mean(header_probs)
-                averaged_probs.append({'header': header, 'prob_class_1': avg_prob})
+            self.logger.info(f"Created {len(final_df)} individual modality predictions from {len(outputs)} output files")
             
-            # Save aggregated results
-            result_df = pd.DataFrame(averaged_probs)
-            result_df.to_csv(final_output, index=False)
+            # Save all predictions (no aggregation!)
+            final_df.to_csv(final_output, index=False)
             return True
         
+        self.logger.error("No valid predictions found")
         return False
     
-    def _aggregate_regression_outputs(self, outputs: List[Path], final_output: Path) -> bool:
-        """Aggregate age predictions."""
+    def _combine_regression_outputs(self, outputs: List[Path], final_output: Path) -> bool:
+        """Combine age predictions - keep all modalities as separate cases."""
         import pandas as pd
-        import numpy as np
         
-        all_ages = []
-        headers = []
+        all_predictions = []
         
         for output_file in outputs:
             try:
+                # Extract subject ID and modality from the output filename
+                subject_id = self._extract_subject_from_filename(output_file.name)
+                modality = self._extract_modality_from_filename(output_file.name)
+                
+                if not subject_id:
+                    self.logger.warning(f"Could not extract subject ID from filename: {output_file.name}")
+                    continue
+                
+                # Load the CSV
                 df = pd.read_csv(output_file)
-                if 'value' in df.columns:
-                    all_ages.extend(df['value'].tolist())
-                    headers.extend(df['header'].tolist())
+                if 'value' not in df.columns:
+                    self.logger.warning(f"No value column in {output_file.name}")
+                    continue
+                
+                # Get the age prediction (assuming single row per file)
+                if len(df) > 0:
+                    age = float(df['value'].iloc[0])
+                    
+                    # Create unique header for this modality case
+                    header = f"{subject_id}_{modality}" if modality else subject_id
+                    
+                    all_predictions.append({
+                        'header': header,
+                        'value': age
+                    })
+                    
+                    self.logger.debug(f"Added prediction: {header} -> {age}")
+                
             except Exception as e:
                 self.logger.warning(f"Could not read {output_file}: {e}")
                 continue
         
-        if all_ages:
-            # Average ages per subject
-            unique_headers = list(set(headers))
-            averaged_ages = []
+        if all_predictions:
+            # Create final DataFrame with ALL modalities as separate cases
+            final_df = pd.DataFrame(all_predictions)
             
-            for header in unique_headers:
-                header_ages = [age for h, age in zip(headers, all_ages) if h == header]
-                avg_age = np.mean(header_ages)
-                averaged_ages.append({'header': header, 'value': avg_age})
+            self.logger.info(f"Created {len(final_df)} individual modality predictions from {len(outputs)} output files")
             
-            # Save aggregated results
-            result_df = pd.DataFrame(averaged_ages)
-            result_df.to_csv(final_output, index=False)
+            # Save all predictions (no aggregation!)
+            final_df.to_csv(final_output, index=False)
             return True
         
+        self.logger.error("No valid age predictions found")
         return False
     
     def _aggregate_segmentation_outputs(self, outputs: List[Path], final_output: Path) -> bool:
-        """Aggregate segmentation outputs (use first available)."""
+        """Aggregate segmentation outputs."""
         import shutil
         
-        # For segmentation, just use the first successful output
+        # For segmentation, use the first successful output
         # In a real system, you might want to combine segmentations
         if outputs:
             shutil.copy(outputs[0], final_output)
             return True
         
         return False
+    
+    def _extract_subject_from_header(self, header: str) -> str:
+        """Extract subject ID from header, removing modality suffix."""
+        # Handle various header formats like:
+        # "sub_1_flair" -> "sub_1"
+        # "sub_25_adc" -> "sub_25" 
+        # "sub_123_dwi_b1000" -> "sub_123"
+        # "/path/to/sub_45_t2s.nii.gz" -> "sub_45"
+        
+        # First try to find sub_X pattern
+        match = re.search(r'(sub_\d+)', header)
+        if match:
+            return match.group(1)
+        
+        # Fallback: if header doesn't contain sub_ pattern, return as-is
+        self.logger.warning(f"Could not extract subject ID from header: {header}")
+        return header
+    
+    def _extract_subject_from_filename(self, filename: str) -> str:
+        """Extract subject ID from output filename."""
+        # Handle filename formats like:
+        # "180201_task1_output_sub_1_flair.csv" -> "sub_1"
+        # "180201_task3_output_sub_25_t1.csv" -> "sub_25"
+        # "entity_task2_output_sub_123_dwi_b1000.nii.gz" -> "sub_123"
+        
+        # Look for pattern: _sub_X_ or _sub_X. (before file extension)
+        match = re.search(r'_?(sub_\d+)_', filename)
+        if match:
+            return match.group(1)
+        
+        # Try pattern at end: _sub_X.extension
+        match = re.search(r'_?(sub_\d+)\.', filename)
+        if match:
+            return match.group(1)
+        
+        # Try any sub_X pattern in the filename
+        match = re.search(r'(sub_\d+)', filename)
+        if match:
+            return match.group(1)
+        
+        self.logger.warning(f"Could not extract subject ID from filename: {filename}")
+        return None
+    
+    def _extract_modality_from_filename(self, filename: str) -> str:
+        """Extract modality from output filename."""
+        # Handle filename formats like:
+        # "180201_task1_output_sub_1_flair.csv" -> "flair"
+        # "entity_task3_output_sub_25_t1.csv" -> "t1"
+        # "test_task2_output_sub_123_dwi_b1000.nii.gz" -> "dwi_b1000"
+        
+        # Known modalities
+        modalities = ['flair', 'adc', 'dwi_b1000', 't2s', 'swi', 't1', 't2']
+        
+        for modality in modalities:
+            if modality in filename:
+                return modality
+        
+        # Fallback: try to extract last part before extension
+        # "sub_1_flair.csv" -> "flair"
+        match = re.search(r'_([a-zA-Z0-9_]+)\.(csv|nii\.gz)', filename)
+        if match:
+            potential_modality = match.group(1)
+            # Only return if it looks like a modality (not subject ID)
+            if not potential_modality.startswith('sub_'):
+                return potential_modality
+        
+        self.logger.warning(f"Could not extract modality from filename: {filename}")
+        return "unknown"
