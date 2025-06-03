@@ -197,41 +197,46 @@ class BrainAgePredictionTask(BaseTask):
         return None
     
     def _align_data(self, predictions: dict, ground_truth: dict) -> tuple[list, list]:
-        """Align predictions with ground truth by subject ID."""
+        """Align predictions with ground truth - expand GT for each modality."""
         aligned_preds = []
         aligned_gt = []
         
-        self.logger.info(f"Aligning data: {len(predictions)} predictions, {len(ground_truth)} ground truth labels")
+        self.logger.info(f"Aligning data: {len(predictions)} modality predictions, {len(ground_truth)} subject ground truth labels")
         
         # Debug: show some samples
-        pred_subjects = set(predictions.keys())
-        gt_subjects = set(ground_truth.keys())
+        pred_headers = list(predictions.keys())
+        gt_subjects = list(ground_truth.keys())
         
-        self.logger.info(f"Prediction subjects sample: {list(pred_subjects)[:5]}")
-        self.logger.info(f"Ground truth subjects sample: {list(gt_subjects)[:5]}")
+        self.logger.info(f"Prediction headers sample: {pred_headers[:5]}")
+        self.logger.info(f"Ground truth subjects sample: {gt_subjects[:5]}")
         
-        # Find matches
-        matched_subjects = []
-        for subject_id in ground_truth:
-            if subject_id in predictions:
-                aligned_preds.append(predictions[subject_id])
-                aligned_gt.append(ground_truth[subject_id])
-                matched_subjects.append(subject_id)
+        # Process each prediction (which is now per modality)
+        matched_cases = []
+        for header, pred_value in predictions.items():
+            # Extract subject ID from header: "sub_1_t1" -> "sub_1"
+            subject_id = self._extract_subject_id(header)
+            
+            if subject_id and subject_id in ground_truth:
+                # Use the same ground truth age for this modality
+                gt_value = ground_truth[subject_id]
+                
+                aligned_preds.append(pred_value)
+                aligned_gt.append(gt_value)
+                matched_cases.append(header)
+                
+                self.logger.debug(f"Matched: {header} (pred={pred_value:.1f}) -> {subject_id} (gt={gt_value:.1f})")
             else:
-                self.logger.warning(f"No prediction found for subject {subject_id}")
+                if subject_id:
+                    self.logger.warning(f"No ground truth found for subject {subject_id} (header: {header})")
+                else:
+                    self.logger.warning(f"Could not extract subject ID from header: {header}")
         
-        # Check for predictions without ground truth
-        missing_gt = pred_subjects - gt_subjects
-        if missing_gt:
-            self.logger.warning(f"Predictions without ground truth: {missing_gt}")
+        self.logger.info(f"Successfully aligned {len(aligned_preds)} modality predictions with ground truth")
+        self.logger.info(f"Matched cases: {matched_cases[:5]}{'...' if len(matched_cases) > 5 else ''}")
         
-        # Check for ground truth without predictions  
-        missing_pred = gt_subjects - pred_subjects
-        if missing_pred:
-            self.logger.warning(f"Ground truth without predictions: {missing_pred}")
-        
-        self.logger.info(f"Successfully aligned {len(aligned_preds)} subject predictions with ground truth")
-        self.logger.info(f"Matched subjects: {matched_subjects[:5]}{'...' if len(matched_subjects) > 5 else ''}")
+        # Show alignment summary
+        unique_subjects = set(self._extract_subject_id(header) for header in matched_cases if self._extract_subject_id(header))
+        self.logger.info(f"Evaluation covers {len(unique_subjects)} subjects with {len(aligned_preds)} total modality cases")
         
         return aligned_preds, aligned_gt
     
@@ -246,17 +251,17 @@ class BrainAgePredictionTask(BaseTask):
             ages = list(predictions.values())
             min_age, max_age = min(ages), max(ages)
             
-            self.logger.info(f"Age prediction validation:")
+            self.logger.info("Age prediction validation:")
             self.logger.info(f"  Number of predictions: {len(predictions)}")
             self.logger.info(f"  Age range: [{min_age:.1f}, {max_age:.1f}]")
             
             # Check for reasonable age range
             if min_age < 0 or max_age > 150:
-                self.logger.warning(f"Some ages outside reasonable range [0, 150]")
+                self.logger.warning("Some ages outside reasonable range [0, 150]")
             
             # Check for missing subjects
             expected_subjects = set(sub.name for sub in self.get_subject_dirs())
-            predicted_subjects = set(predictions.keys())
+            predicted_subjects = set(self._extract_subject_id(header) for header in predictions.keys() if self._extract_subject_id(header))
             
             missing = expected_subjects - predicted_subjects
             extra = predicted_subjects - expected_subjects
