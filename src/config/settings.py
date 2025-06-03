@@ -36,18 +36,32 @@ class Settings:
     AE_WORST: float = float(os.getenv("FOMO_AE_WORST", "100.0"))
     CORR_WORST: float = float(os.getenv("FOMO_CORR_WORST", "-100.0"))
     
-    # Singularity settings
+    # Apptainer settings
     APPTAINER_EXECUTABLE: str = os.getenv("FOMO_APPTAINER_EXECUTABLE", "apptainer")
     PYTHON_SCRIPT: str = os.getenv("FOMO_PYTHON_SCRIPT", "/app/predict.py")
     
     # Execution settings
     CONTAINER_TIMEOUT: int = int(os.getenv("FOMO_CONTAINER_TIMEOUT", "3600"))
+    INSTANCE_START_TIMEOUT: int = int(os.getenv("FOMO_INSTANCE_START_TIMEOUT", "60"))
+    INSTANCE_STOP_TIMEOUT: int = int(os.getenv("FOMO_INSTANCE_STOP_TIMEOUT", "60"))
+    
+    # GPU settings
+    ENABLE_GPU: bool = os.getenv("FOMO_ENABLE_GPU", "false").lower() == "true"
+    
+    # Debug settings
+    DEBUG_MODE: bool = os.getenv("FOMO_DEBUG_MODE", "false").lower() == "true"
+    KEEP_INTERMEDIATE_FILES: bool = os.getenv("FOMO_KEEP_INTERMEDIATE_FILES", "false").lower() == "true"
     
     def __post_init__(self):
         """Set computed paths after initialization."""
         self.TASK1_DATA_DIR = self.BASE_DIR / "fomo-task1-val"
         self.TASK2_DATA_DIR = self.BASE_DIR / "fomo-task2-val"
         self.TASK3_DATA_DIR = self.BASE_DIR / "fomo-task3-val"
+    
+    @property
+    def gpu_flag(self) -> str:
+        """Get GPU flag for container commands."""
+        return "--nv" if self.ENABLE_GPU else ""
 
 
 # Global settings instance

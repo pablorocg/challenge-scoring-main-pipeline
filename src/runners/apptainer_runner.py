@@ -1,22 +1,24 @@
 # src/runners/apptainer_runner.py
-"""Apptainer container runner."""
+"""Apptainer container runner with instance support."""
 
 import subprocess
+import time
 from pathlib import Path
 from typing import List, Tuple
+from contextlib import contextmanager
 
 from src.config.settings import SETTINGS
 from src.utils.logging_utils import get_logger
 
 
 class ApptainerRunner:
-    """Runs inference using Apptainer containers."""
+    """Runs inference using Apptainer container instances."""
     
     def __init__(self):
         self.logger = get_logger(__name__)
     
     def run_inference(self, container_path: Path, task, output_path: Path) -> bool:
-        """Run inference using an Apptainer container for all modalities."""
+        """Run inference using an Apptainer container instance for all modalities."""
         self.logger.info(f"Running inference with {container_path}")
         
         # Get all input files for this task
@@ -26,30 +28,195 @@ class ApptainerRunner:
             self.logger.error("No input files found for task")
             return False
         
-        # Run container for each modality/file combination
-        all_outputs = []
-        success_count = 0
+        # Create instance name based on container and timestamp
+        instance_name = f"fomo_{container_path.stem}_{int(time.time())}"
         
-        for input_file, modality in input_files:
-            self.logger.info(f"Processing {modality}: {input_file}")
+        # Use context manager for instance lifecycle
+        try:
+            with self._container_instance(container_path, input_files, output_path, instance_name) as instance:
+                if not instance:
+                    return False
+                
+                # Run inference for each modality/file combination
+                all_outputs = []
+                success_count = 0
+                
+                for input_file, modality in input_files:
+                    self.logger.info(f"Processing {modality}: {input_file}")
+                    
+                    # Create individual output file for this modality
+                    modality_output = output_path.parent / f"{output_path.stem}_{modality}{output_path.suffix}"
+                    
+                    # Run inference on this file using the instance
+                    if self._run_instance_inference(instance_name, modality, input_file, modality_output):
+                        all_outputs.append(modality_output)
+                        success_count += 1
+                        self.logger.info(f"✅ Successfully processed {modality}: {input_file}")
+                    else:
+                        self.logger.error(f"❌ Failed to process {modality}: {input_file}")
+                
+                # Aggregate results if needed
+                if success_count > 0:
+                    result = self._aggregate_outputs(all_outputs, output_path, task)
+                    self.logger.info(f"Processing Summary: {success_count}/{len(input_files)} files successful")
+                    return result
+                
+                self.logger.error("All inference attempts failed")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"Error during inference: {e}")
+            return False
+    
+    @contextmanager
+    def _container_instance(self, container_path: Path, input_files: List[Tuple[Path, str]], 
+                           output_path: Path, instance_name: str):
+        """Context manager for container instance lifecycle."""
+        instance = None
+        try:
+            # Determine unique input and output directories for binding
+            input_dirs = set(input_file.parent for input_file, _ in input_files)
+            output_dir = output_path.parent
             
-            # Create individual output file for this modality
-            modality_output = output_path.parent / f"{output_path.stem}_{modality}{output_path.suffix}"
+            # Start container instance
+            self.logger.info(f"🚀 Starting container instance: {instance_name}")
             
-            # Build and run command for this specific modality
-            cmd = self._build_command(container_path, modality, input_file, modality_output)
-            
-            if self._run_single_inference(cmd, input_file, modality_output):
-                all_outputs.append(modality_output)
-                success_count += 1
+            if self._start_instance(container_path, input_dirs, output_dir, instance_name):
+                self.logger.info(f"✅ Container instance started successfully")
+                instance = instance_name
+                yield instance
             else:
-                self.logger.error(f"Failed to process {modality}: {input_file}")
-        
-        # Aggregate results if needed (for tasks that need multiple modalities)
-        if success_count > 0:
-            return self._aggregate_outputs(all_outputs, output_path, task)
-        
-        return False
+                self.logger.error(f"❌ Failed to start container instance")
+                yield None
+                
+        finally:
+            # Cleanup: stop instance
+            if instance:
+                self._stop_instance(instance_name)
+    
+    def _start_instance(self, container_path: Path, input_dirs: set, output_dir: Path, 
+                       instance_name: str) -> bool:
+        """Start container instance with appropriate binds."""
+        try:
+            # Ensure output directory exists
+            output_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Build command with all necessary binds
+            cmd = [
+                SETTINGS.APPTAINER_EXECUTABLE,
+                "instance", "start"
+            ]
+            
+            # Add GPU support if enabled
+            if SETTINGS.ENABLE_GPU:
+                cmd.append("--nv")
+            
+            # Add bind mounts for all input directories (read-only)
+            for input_dir in input_dirs:
+                cmd.extend(["--bind", f"{input_dir}:/input/{input_dir.name}:ro"])
+            
+            # Add bind mount for output directory (read-write)
+            cmd.extend(["--bind", f"{output_dir}:/output:rw"])
+            
+            # Add container path and instance name
+            cmd.extend([str(container_path), instance_name])
+            
+            self.logger.info(f"Starting instance command: {' '.join(cmd)}")
+            
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=SETTINGS.INSTANCE_START_TIMEOUT  # Use configured timeout
+            )
+            
+            if result.returncode == 0:
+                # Verify instance is running
+                return self._verify_instance_running(instance_name)
+            else:
+                self.logger.error(f"Failed to start instance: {result.stderr}")
+                return False
+                
+        except subprocess.TimeoutExpired:
+            self.logger.error("Instance start timed out")
+            return False
+        except Exception as e:
+            self.logger.error(f"Error starting instance: {e}")
+            return False
+    
+    def _verify_instance_running(self, instance_name: str) -> bool:
+        """Verify that the instance is running."""
+        try:
+            cmd = [SETTINGS.APPTAINER_EXECUTABLE, "instance", "list", instance_name]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            return result.returncode == 0 and instance_name in result.stdout
+        except Exception:
+            return False
+    
+    def _stop_instance(self, instance_name: str):
+        """Stop container instance."""
+        try:
+            self.logger.info(f"🛑 Stopping container instance: {instance_name}")
+            cmd = [SETTINGS.APPTAINER_EXECUTABLE, "instance", "stop", instance_name]
+            
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=SETTINGS.INSTANCE_STOP_TIMEOUT
+            )
+            
+            if result.returncode == 0:
+                self.logger.info(f"✅ Container instance stopped successfully")
+            else:
+                self.logger.warning(f"⚠️ Failed to stop instance cleanly: {result.stderr}")
+                
+        except Exception as e:
+            self.logger.error(f"Error stopping instance: {e}")
+    
+    def _run_instance_inference(self, instance_name: str, modality: str, 
+                               input_file: Path, output_file: Path) -> bool:
+        """Run inference using container instance."""
+        try:
+            # Build command for this specific inference
+            cmd = [
+                SETTINGS.APPTAINER_EXECUTABLE,
+                "exec",
+                f"instance://{instance_name}",
+                "python", SETTINGS.PYTHON_SCRIPT,
+                f"--{modality}",  # Use specific modality flag
+                "--input", f"/input/{input_file.parent.name}/{input_file.name}",
+                "--output", f"/output/{output_file.name}"
+            ]
+            
+            self.logger.info(f"⏳ Running inference command: {' '.join(cmd)}")
+            
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=SETTINGS.CONTAINER_TIMEOUT
+            )
+            
+            if result.returncode == 0:
+                # Verify output was created
+                if output_file.exists():
+                    return True
+                else:
+                    self.logger.error(f"Inference completed but no output file created: {output_file}")
+                    return False
+            else:
+                self.logger.error(f"Inference failed: {result.stderr}")
+                if result.stdout:
+                    self.logger.error(f"Stdout: {result.stdout}")
+                return False
+                
+        except subprocess.TimeoutExpired:
+            self.logger.error(f"Inference timed out for {modality}: {input_file}")
+            return False
+        except Exception as e:
+            self.logger.error(f"Error running inference: {e}")
+            return False
     
     def _get_input_files(self, task) -> List[Tuple[Path, str]]:
         """Get list of (file_path, modality) tuples for the task."""
@@ -65,7 +232,7 @@ class ApptainerRunner:
             
             # Find files for each modality
             for modality in task.image_modalities:
-                if modality in ["t2s_or_swi"]:  # Handle optional modalities
+                if modality == "t2s" or modality == "swi":  # Handle optional modalities
                     # Try t2s first, then swi
                     t2s_file = ses_dir / "t2s.nii.gz"
                     swi_file = ses_dir / "swi.nii.gz"
@@ -81,51 +248,6 @@ class ApptainerRunner:
                         input_files.append((modality_file, modality))
         
         return input_files
-    
-    def _build_command(self, container_path: Path, modality: str, input_file: Path, output_file: Path) -> list[str]:
-        """Build Apptainer command for a specific modality and file."""
-        cmd = [
-            SETTINGS.APPTAINER_EXECUTABLE,
-            "exec",
-            "--bind", f"{input_file.parent}:/input:ro",
-            "--bind", f"{output_file.parent}:/output:rw",
-            str(container_path),
-            "python", SETTINGS.PYTHON_SCRIPT,
-            f"--{modality}",  # Use specific modality flag
-            "--input", f"/input/{input_file.name}",
-            "--output", f"/output/{output_file.name}"
-        ]
-
-        self.logger.info(f"Running command: {' '.join(cmd)}")
-        
-        return cmd
-    
-    def _run_single_inference(self, cmd: list[str], input_file: Path, output_file: Path) -> bool:
-        """Run a single inference command."""
-        # Ensure output directory exists
-        output_file.parent.mkdir(parents=True, exist_ok=True)
-        
-        try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=SETTINGS.CONTAINER_TIMEOUT
-            )
-            
-            if result.returncode == 0:
-                self.logger.info(f"Inference completed for {input_file}")
-                return output_file.exists()  # Verify output was created
-            else:
-                self.logger.error(f"Inference failed: {result.stderr}")
-                return False
-                
-        except subprocess.TimeoutExpired:
-            self.logger.error("Inference timed out")
-            return False
-        except Exception as e:
-            self.logger.error(f"Error running container: {e}")
-            return False
     
     def _aggregate_outputs(self, modality_outputs: List[Path], final_output: Path, task) -> bool:
         """Aggregate multiple modality outputs into final result."""
@@ -235,40 +357,3 @@ class ApptainerRunner:
             return True
         
         return False
-
-
-# src/tasks/task1_infarct.py (Updated)
-
-
-
-# src/tasks/task2_meningioma.py (Updated)
-
-
-
-# src/tasks/task3_brain_age.py (Updated)
-
-
-
-# # Updated README.md
-# ## Container Command Format
-
-# The system runs containers multiple times per task, once for each image file:
-
-# ```bash
-# # Task 1 - Multiple runs per subject:
-# python /app/predict.py --flair --input /input/flair.nii.gz --output /output/result_flair.csv
-# python /app/predict.py --adc --input /input/adc.nii.gz --output /output/result_adc.csv
-# python /app/predict.py --dwi_b1000 --input /input/dwi_b1000.nii.gz --output /output/result_dwi.csv
-# python /app/predict.py --t2s --input /input/t2s.nii.gz --output /output/result_t2s.csv
-
-# # Task 2 - Multiple runs per subject:
-# python /app/predict.py --flair --input /input/flair.nii.gz --output /output/seg_flair.nii.gz
-# python /app/predict.py --dwi_b1000 --input /input/dwi_b1000.nii.gz --output /output/seg_dwi.nii.gz
-# python /app/predict.py --swi --input /input/swi.nii.gz --output /output/seg_swi.nii.gz
-
-# # Task 3 - Multiple runs per subject:
-# python /app/predict.py --t1 --input /input/t1.nii.gz --output /output/age_t1.csv
-# python /app/predict.py --t2 --input /input/t2.nii.gz --output /output/age_t2.csv
-# ```
-
-# Results from multiple modalities are automatically aggregated into the final output.
