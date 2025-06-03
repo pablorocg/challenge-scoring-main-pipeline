@@ -26,7 +26,7 @@ class InfarctClassificationTask(BaseTask):
     
     @property
     def image_modalities(self) -> list[str]:
-        return ["flair", "adc", "dwi_b1000", "t2s_or_swi"]
+        return ["flair", "adc", "dwi_b1000", "t2s", "swi"]
     
     def evaluate(self, output_path: Path) -> Dict[str, Any]:
         """Evaluate classification predictions."""

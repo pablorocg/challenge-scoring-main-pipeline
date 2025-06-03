@@ -95,6 +95,8 @@ class ApptainerRunner:
             "--input", f"/input/{input_file.name}",
             "--output", f"/output/{output_file.name}"
         ]
+
+        self.logger.info(f"Running command: {' '.join(cmd)}")
         
         return cmd
     
