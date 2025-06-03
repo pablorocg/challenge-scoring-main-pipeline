@@ -1,5 +1,5 @@
 # src/runners/apptainer_runner.py
-"""Apptainer container runner with subject-by-subject processing."""
+"""Apptainer container runner with organized output and proper segmentation handling."""
 
 import subprocess
 import time
@@ -18,9 +18,10 @@ class ApptainerRunner:
     def __init__(self):
         self.logger = get_logger(__name__)
     
-    def run_inference(self, container_path: Path, task, output_path: Path) -> bool:
+    def run_inference(self, container_path: Path, task, output_path: Path, task_output_dir: Path) -> bool:
         """Run inference by processing each subject individually."""
         self.logger.info(f"Running inference with {container_path}")
+        self.logger.info(f"Organized output directory: {task_output_dir}")
         
         # Get all subjects for this task
         subject_dirs = task.get_subject_dirs()
@@ -46,7 +47,7 @@ class ApptainerRunner:
             # Process this subject
             subject_outputs = []
             if self._process_subject(container_path, subject_dir, subject_modalities, 
-                                   output_path, subject_outputs):
+                                   output_path, subject_outputs, task_output_dir):
                 all_outputs.extend(subject_outputs)
                 success_count += 1
                 self.logger.info(f"✅ Successfully processed {subject_dir.name}")
@@ -55,7 +56,7 @@ class ApptainerRunner:
         
         # Aggregate all results
         if success_count > 0:
-            result = self._aggregate_all_outputs(all_outputs, output_path, task)
+            result = self._aggregate_all_outputs(all_outputs, output_path, task, task_output_dir)
             self.logger.info(f"📊 Processing Summary: {success_count}/{len(subject_dirs)} subjects successful")
             return result
         
@@ -93,14 +94,14 @@ class ApptainerRunner:
     
     def _process_subject(self, container_path: Path, subject_dir: Path, 
                         modalities: List[Tuple[Path, str]], output_path: Path,
-                        subject_outputs: List[Path]) -> bool:
+                        subject_outputs: List[Path], task_output_dir: Path) -> bool:
         """Process a single subject with its own container instance."""
         
         # Create unique instance name for this subject
         instance_name = f"fomo_{container_path.stem}_{subject_dir.name}_{int(time.time())}"
         
         try:
-            with self._container_instance(container_path, subject_dir, instance_name) as instance:
+            with self._container_instance(container_path, subject_dir, instance_name, task_output_dir) as instance:
                 if not instance:
                     return False
                 
@@ -108,8 +109,10 @@ class ApptainerRunner:
                 for modality_file, modality in modalities:
                     self.logger.info(f"  🔍 Processing {modality}: {modality_file.name}")
                     
-                    # Create output file for this modality with proper NIfTI handling
-                    modality_output = self._create_modality_output_path(output_path, subject_dir.name, modality)
+                    # Create output file for this modality in organized directory
+                    modality_output = self._create_modality_output_path(
+                        output_path, subject_dir.name, modality, task_output_dir
+                    )
                     
                     # Run inference on this file using the instance
                     if self._run_instance_inference(instance_name, modality, modality_file, modality_output):
@@ -125,28 +128,29 @@ class ApptainerRunner:
             self.logger.error(f"Error processing subject {subject_dir.name}: {e}")
             return False
     
-    def _create_modality_output_path(self, base_output_path: Path, subject_name: str, modality: str) -> Path:
-        """Create proper output path for modality, handling .nii.gz files correctly."""
-        parent_dir = base_output_path.parent
+    def _create_modality_output_path(self, base_output_path: Path, subject_name: str, 
+                                   modality: str, task_output_dir: Path) -> Path:
+        """Create proper output path for modality in organized directory."""
         
         # Handle .nii.gz files specially
         if base_output_path.name.endswith('.nii.gz'):
             # Remove .nii.gz to get the base name
             base_name = base_output_path.name[:-7]  # Remove '.nii.gz'
-            return parent_dir / f"{base_name}_{subject_name}_{modality}.nii.gz"
+            return task_output_dir / f"{base_name}_{subject_name}_{modality}.nii.gz"
         else:
             # For other file types (.csv, etc.), use original logic
-            return parent_dir / f"{base_output_path.stem}_{subject_name}_{modality}{base_output_path.suffix}"
+            return task_output_dir / f"{base_output_path.stem}_{subject_name}_{modality}{base_output_path.suffix}"
     
     @contextmanager
-    def _container_instance(self, container_path: Path, subject_dir: Path, instance_name: str):
+    def _container_instance(self, container_path: Path, subject_dir: Path, 
+                           instance_name: str, task_output_dir: Path):
         """Context manager for single-subject container instance."""
         instance = None
         try:
             # Start container instance for this subject
             self.logger.info(f"🚀 Starting instance for {subject_dir.name}: {instance_name}")
             
-            if self._start_subject_instance(container_path, subject_dir, instance_name):
+            if self._start_subject_instance(container_path, subject_dir, instance_name, task_output_dir):
                 self.logger.info(f"✅ Instance started for {subject_dir.name}")
                 instance = instance_name
                 yield instance
@@ -158,14 +162,14 @@ class ApptainerRunner:
             if instance:
                 self._stop_instance(instance_name)
     
-    def _start_subject_instance(self, container_path: Path, subject_dir: Path, instance_name: str) -> bool:
+    def _start_subject_instance(self, container_path: Path, subject_dir: Path, 
+                              instance_name: str, task_output_dir: Path) -> bool:
         """Start container instance for a single subject."""
         try:
             ses_dir = subject_dir / "ses_1"
-            output_dir = SETTINGS.OUTPUT_DIR
             
-            # Ensure output directory exists
-            output_dir.mkdir(parents=True, exist_ok=True)
+            # Ensure task output directory exists
+            task_output_dir.mkdir(parents=True, exist_ok=True)
             
             # Build command with subject-specific binds
             cmd = [
@@ -180,8 +184,8 @@ class ApptainerRunner:
             # Bind THIS subject's session directory to /input
             cmd.extend(["--bind", f"{ses_dir}:/input:ro"])
             
-            # Bind output directory
-            cmd.extend(["--bind", f"{output_dir}:/output:rw"])
+            # Bind the specific task output directory
+            cmd.extend(["--bind", f"{task_output_dir}:/output:rw"])
             
             # Add container and instance name
             cmd.extend([str(container_path), instance_name])
@@ -281,15 +285,16 @@ class ApptainerRunner:
             self.logger.error(f"Error running inference: {e}")
             return False
     
-    def _aggregate_all_outputs(self, all_outputs: List[Path], final_output: Path, task) -> bool:
-        """Combine outputs from all subjects and modalities (no aggregation - keep all cases)."""
+    def _aggregate_all_outputs(self, all_outputs: List[Path], final_output: Path, 
+                              task, task_output_dir: Path) -> bool:
+        """Combine outputs from all subjects and modalities."""
         try:
             if task.name == "Infarct Classification":
                 return self._combine_classification_outputs(all_outputs, final_output)
             elif task.name == "Brain Age Prediction":
                 return self._combine_regression_outputs(all_outputs, final_output)
             elif task.name == "Meningioma Segmentation":
-                return self._aggregate_segmentation_outputs(all_outputs, final_output)
+                return self._organize_segmentation_outputs(all_outputs, final_output, task_output_dir)
             else:
                 # Default: use first output
                 if all_outputs:
@@ -411,34 +416,72 @@ class ApptainerRunner:
         self.logger.error("No valid age predictions found")
         return False
     
-    def _aggregate_segmentation_outputs(self, outputs: List[Path], final_output: Path) -> bool:
-        """Aggregate segmentation outputs."""
-        import shutil
+    def _organize_segmentation_outputs(self, outputs: List[Path], final_output: Path, 
+                                     task_output_dir: Path) -> bool:
+        """Organize segmentation outputs by subject."""
+        import pandas as pd
         
-        # For segmentation, use the first successful output
-        # In a real system, you might want to combine segmentations
-        if outputs:
-            shutil.copy(outputs[0], final_output)
+        # Group outputs by subject
+        subject_outputs = {}
+        
+        for output_file in outputs:
+            subject_id = self._extract_subject_from_filename(output_file.name)
+            modality = self._extract_modality_from_filename(output_file.name)
+            
+            if subject_id:
+                if subject_id not in subject_outputs:
+                    subject_outputs[subject_id] = []
+                subject_outputs[subject_id].append({
+                    'file': output_file,
+                    'modality': modality
+                })
+        
+        # Create segmentations directory
+        seg_dir = task_output_dir / "segmentations"
+        seg_dir.mkdir(exist_ok=True)
+        
+        # For each subject, use the first modality prediction as representative
+        # (since the user mentioned masks are the same for all modalities of same subject)
+        subject_predictions = []
+        
+        for subject_id, subject_files in subject_outputs.items():
+            if subject_files:
+                # Use first modality as representative
+                representative_file = subject_files[0]['file']
+                representative_modality = subject_files[0]['modality']
+                
+                # Copy to organized location
+                subject_seg_file = seg_dir / f"{subject_id}_segmentation.nii.gz"
+                import shutil
+                shutil.copy(representative_file, subject_seg_file)
+                
+                subject_predictions.append({
+                    'subject_id': subject_id,
+                    'segmentation_file': subject_seg_file,
+                    'representative_modality': representative_modality,
+                    'num_modalities_processed': len(subject_files)
+                })
+                
+                self.logger.info(f"Organized segmentation for {subject_id}: {subject_seg_file}")
+        
+        # Create summary CSV
+        if subject_predictions:
+            summary_df = pd.DataFrame(subject_predictions)
+            summary_file = task_output_dir / "segmentation_summary.csv"
+            summary_df.to_csv(summary_file, index=False)
+            
+            self.logger.info(f"Created segmentation summary: {summary_file}")
+            self.logger.info(f"Organized {len(subject_predictions)} subject segmentations")
+            
+            # Create a symbolic link or copy for the main output (for compatibility)
+            if subject_predictions:
+                import shutil
+                shutil.copy(subject_predictions[0]['segmentation_file'], final_output)
+            
             return True
         
+        self.logger.error("No segmentation outputs to organize")
         return False
-    
-    def _extract_subject_from_header(self, header: str) -> str:
-        """Extract subject ID from header, removing modality suffix."""
-        # Handle various header formats like:
-        # "sub_1_flair" -> "sub_1"
-        # "sub_25_adc" -> "sub_25" 
-        # "sub_123_dwi_b1000" -> "sub_123"
-        # "/path/to/sub_45_t2s.nii.gz" -> "sub_45"
-        
-        # First try to find sub_X pattern
-        match = re.search(r'(sub_\d+)', header)
-        if match:
-            return match.group(1)
-        
-        # Fallback: if header doesn't contain sub_ pattern, return as-is
-        self.logger.warning(f"Could not extract subject ID from header: {header}")
-        return header
     
     def _extract_subject_from_filename(self, filename: str) -> str:
         """Extract subject ID from output filename."""

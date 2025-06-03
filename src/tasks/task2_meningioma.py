@@ -1,6 +1,7 @@
-"""Task 2: Meningioma Segmentation - FIXED VERSION."""
+"""Task 2: Meningioma Segmentation - FIXED VERSION with subject-specific evaluation."""
 
 import numpy as np
+import pandas as pd
 from pathlib import Path
 from typing import Dict, Any
 
@@ -11,7 +12,7 @@ from src.utils.logging_utils import get_logger
 
 
 class MeningiomaSegmentationTask(BaseTask):
-    """Meningioma segmentation task with proper modality handling."""
+    """Meningioma segmentation task with proper subject-specific evaluation."""
     
     def __init__(self):
         self.logger = get_logger(__name__)
@@ -58,8 +59,14 @@ class MeningiomaSegmentationTask(BaseTask):
         
         return available_modalities
     
-    def evaluate(self, output_path: Path) -> Dict[str, Any]:
-        """Evaluate segmentation predictions."""
+    def evaluate(self, output_path: Path, task_output_dir: Path = None) -> Dict[str, Any]:
+        """Evaluate segmentation predictions subject by subject."""
+        
+        # If task_output_dir is provided, look for organized segmentations
+        if task_output_dir and (task_output_dir / "segmentations").exists():
+            return self._evaluate_organized_segmentations(task_output_dir)
+        
+        # Fallback to single file evaluation
         if not output_path.exists():
             self.logger.error(f"Output file does not exist: {output_path}")
             return {
@@ -67,6 +74,127 @@ class MeningiomaSegmentationTask(BaseTask):
                 "nsd": SETTINGS.NSD_WORST
             }
         
+        return self._evaluate_single_segmentation(output_path)
+    
+    def _evaluate_organized_segmentations(self, task_output_dir: Path) -> Dict[str, Any]:
+        """Evaluate segmentations organized by subject."""
+        seg_dir = task_output_dir / "segmentations"
+        
+        if not seg_dir.exists():
+            self.logger.error(f"Segmentations directory does not exist: {seg_dir}")
+            return {
+                "dice": SETTINGS.DSC_WORST,
+                "nsd": SETTINGS.NSD_WORST
+            }
+        
+        # Find all subject segmentation files
+        seg_files = list(seg_dir.glob("*_segmentation.nii.gz"))
+        
+        if not seg_files:
+            self.logger.error("No segmentation files found in organized directory")
+            return {
+                "dice": SETTINGS.DSC_WORST,
+                "nsd": SETTINGS.NSD_WORST
+            }
+        
+        self.logger.info(f"Found {len(seg_files)} segmentation files for evaluation")
+        
+        # Evaluate each subject individually
+        results = []
+        all_dice_scores = []
+        all_nsd_scores = []
+        
+        for seg_file in seg_files:
+            # Extract subject ID from filename: "sub_25_segmentation.nii.gz" -> "sub_25"
+            subject_id = self._extract_subject_from_filename(seg_file.name)
+            
+            if not subject_id:
+                self.logger.warning(f"Could not extract subject ID from: {seg_file.name}")
+                continue
+            
+            self.logger.info(f"Evaluating segmentation for {subject_id}")
+            
+            # Load prediction segmentation
+            pred_seg = self._load_segmentation(seg_file)
+            if pred_seg is None:
+                self.logger.warning(f"Failed to load prediction for {subject_id}")
+                continue
+            
+            # Load ground truth for this subject
+            gt_seg = self._load_ground_truth_segmentation(subject_id)
+            if gt_seg is None:
+                self.logger.warning(f"No ground truth found for {subject_id}")
+                continue
+            
+            # Compute metrics for this subject
+            dice = compute_dice(gt_seg, pred_seg)
+            nsd = compute_nsd(gt_seg, pred_seg)
+            
+            # Store individual result
+            results.append({
+                'subject_id': subject_id,
+                'dice': dice,
+                'nsd': nsd,
+                'prediction_file': seg_file.name
+            })
+            
+            all_dice_scores.append(dice)
+            all_nsd_scores.append(nsd)
+            
+            self.logger.info(f"Subject {subject_id}: Dice={dice:.4f}, NSD={nsd:.4f}")
+        
+        # Save detailed results to CSV
+        if results:
+            results_df = pd.DataFrame(results)
+            results_csv = task_output_dir / "segmentation_metrics.csv"
+            results_df.to_csv(results_csv, index=False)
+            
+            # Compute summary statistics
+            mean_dice = np.mean(all_dice_scores)
+            mean_nsd = np.mean(all_nsd_scores)
+            std_dice = np.std(all_dice_scores)
+            std_nsd = np.std(all_nsd_scores)
+            
+            # Add summary row
+            summary_results = results + [{
+                'subject_id': 'MEAN',
+                'dice': mean_dice,
+                'nsd': mean_nsd,
+                'prediction_file': 'summary'
+            }, {
+                'subject_id': 'STD',
+                'dice': std_dice,
+                'nsd': std_nsd,
+                'prediction_file': 'summary'
+            }]
+            
+            summary_df = pd.DataFrame(summary_results)
+            summary_df.to_csv(results_csv, index=False)
+            
+            self.logger.info(f"Saved detailed metrics to: {results_csv}")
+            self.logger.info(f"Evaluation complete: Mean Dice={mean_dice:.4f}±{std_dice:.4f}, Mean NSD={mean_nsd:.4f}±{std_nsd:.4f}")
+            self.logger.info(f"Evaluated {len(results)} subjects")
+            
+            return {
+                "dice": float(mean_dice),
+                "nsd": float(mean_nsd),
+                "dice_std": float(std_dice),
+                "nsd_std": float(std_nsd),
+                "num_subjects": len(results),
+                "detailed_results_file": str(results_csv.relative_to(task_output_dir))
+            }
+        
+        else:
+            self.logger.error("No subjects could be evaluated")
+            return {
+                "dice": SETTINGS.DSC_WORST,
+                "nsd": SETTINGS.NSD_WORST,
+                "num_subjects": 0,
+                "error": "No subjects evaluated successfully"
+            }
+    
+    def _evaluate_single_segmentation(self, output_path: Path) -> Dict[str, Any]:
+        """Fallback: evaluate single segmentation file (legacy mode)."""
         try:
             # Load prediction segmentation
             pred_seg = self._load_segmentation(output_path)
@@ -77,7 +205,7 @@ class MeningiomaSegmentationTask(BaseTask):
                     "nsd": SETTINGS.NSD_WORST
                 }
             
-            # Load ground truth segmentations for all subjects
+            # Load ground truth segmentations for all subjects and average
             all_dice_scores = []
             all_nsd_scores = []
             evaluated_subjects = 0
@@ -86,8 +214,7 @@ class MeningiomaSegmentationTask(BaseTask):
                 gt_seg = self._load_ground_truth_segmentation(subject_dir.name)
                 
                 if gt_seg is not None:
-                    # For now, we'll use the same prediction for all subjects
-                    # In a real implementation, you'd need subject-specific predictions
+                    # Use the same prediction for all subjects (legacy behavior)
                     dice = compute_dice(gt_seg, pred_seg)
                     nsd = compute_nsd(gt_seg, pred_seg)
                     
@@ -102,15 +229,16 @@ class MeningiomaSegmentationTask(BaseTask):
                 avg_dice = np.mean(all_dice_scores)
                 avg_nsd = np.mean(all_nsd_scores)
                 
-                self.logger.info(f"Evaluation complete: Dice={avg_dice:.4f}, NSD={avg_nsd:.4f}, Subjects={evaluated_subjects}")
+                self.logger.info(f"Legacy evaluation complete: Dice={avg_dice:.4f}, NSD={avg_nsd:.4f}, Subjects={evaluated_subjects}")
                 
                 return {
                     "dice": float(avg_dice),
-                    "nsd": float(avg_nsd)
+                    "nsd": float(avg_nsd),
+                    "num_subjects": evaluated_subjects,
+                    "mode": "legacy_single_prediction"
                 }
             else:
                 self.logger.warning("No ground truth segmentations available for evaluation")
-                # Return neutral scores when no ground truth is available
                 return {
                     "dice": 0.5,  # Neutral score instead of worst
                     "nsd": 0.5,   # Neutral score instead of worst
@@ -128,7 +256,7 @@ class MeningiomaSegmentationTask(BaseTask):
         """Load segmentation from NIfTI file."""
         try:
             import nibabel as nib
-            self.logger.info(f"Loading segmentation from: {seg_path}")
+            self.logger.debug(f"Loading segmentation from: {seg_path}")
             nii = nib.load(seg_path)
             data = nii.get_fdata()
             
@@ -139,7 +267,7 @@ class MeningiomaSegmentationTask(BaseTask):
             
             # Check if it's binary
             unique_values = np.unique(data)
-            self.logger.info(f"Segmentation contains values: {unique_values}")
+            self.logger.debug(f"Segmentation contains values: {unique_values}")
             
             # Ensure binary segmentation (0 and 1)
             if len(unique_values) > 2:
@@ -159,7 +287,7 @@ class MeningiomaSegmentationTask(BaseTask):
             gt_path = self.get_labels_path(subject_id) / "seg.nii.gz"
             
             if not gt_path.exists():
-                self.logger.info(f"No ground truth segmentation for {subject_id} at {gt_path}")
+                self.logger.debug(f"No ground truth segmentation for {subject_id} at {gt_path}")
                 return None
             
             import nibabel as nib
@@ -183,22 +311,17 @@ class MeningiomaSegmentationTask(BaseTask):
             self.logger.error(f"Error loading ground truth for {subject_id}: {e}")
             return None
     
-    def _extract_subject_id_from_path(self, file_path: Path) -> str:
-        """Extract subject ID from file path."""
-        # Try to extract subject ID from path
-        parts = file_path.parts
-        for part in parts:
-            if part.startswith('sub_'):
-                return part
-        
-        # Fallback: use filename
+    def _extract_subject_from_filename(self, filename: str) -> str:
+        """Extract subject ID from filename."""
         import re
-        match = re.search(r'sub_(\d+)', str(file_path))
-        if match:
-            return f"sub_{match.group(1)}"
         
-        self.logger.warning(f"Could not extract subject ID from path: {file_path}")
-        return "unknown"
+        # Handle formats like "sub_25_segmentation.nii.gz" -> "sub_25"
+        match = re.search(r'(sub_\d+)', filename)
+        if match:
+            return match.group(1)
+        
+        self.logger.warning(f"Could not extract subject ID from filename: {filename}")
+        return None
     
     def validate_segmentation_output(self, output_path: Path) -> bool:
         """Validate that segmentation output is properly formatted."""

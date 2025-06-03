@@ -48,19 +48,25 @@ def evaluate_container(container_path: Path, runner: ApptainerRunner, logger):
     # Get task configuration
     task = TaskFactory.create_task(task_id)
     
-    # Run inference
-    output_path = SETTINGS.OUTPUT_DIR / f"{entity_id}_{task_id}_output{task.output_extension}"
-    success = runner.run_inference(container_path, task, output_path)
+    # Create organized output directory: /output/task1/entity_id/
+    task_output_dir = SETTINGS.OUTPUT_DIR / task_id / entity_id
+    task_output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Set output path in the organized directory
+    output_path = task_output_dir / f"{entity_id}_{task_id}_output{task.output_extension}"
+    
+    # Run inference with organized output directory
+    success = runner.run_inference(container_path, task, output_path, task_output_dir)
     
     if not success:
         logger.error(f"Inference failed for {container_path}")
         return
     
     # Compute metrics
-    results = task.evaluate(output_path)
+    results = task.evaluate(output_path, task_output_dir)
     
     # Save results
-    save_results(entity_id, task_id, results)
+    save_results(entity_id, task_id, results, task_output_dir)
     
     # Move container to evaluated
     move_container(container_path, SETTINGS.EVALUATED_DIR)
@@ -82,8 +88,8 @@ def parse_container_name(filename: str) -> tuple[str, str]:
     return entity_id, task_id
 
 
-def save_results(entity_id: str, task_id: str, results: dict):
-    """Save evaluation results to JSON file with same name as container."""
+def save_results(entity_id: str, task_id: str, results: dict, task_output_dir: Path):
+    """Save evaluation results to JSON file in organized directory."""
     timestamp = datetime.now().isoformat()
     result_data = {
         'entity_id': entity_id,
@@ -93,9 +99,14 @@ def save_results(entity_id: str, task_id: str, results: dict):
         'results': results
     }
     
-    # JSON file has same name as container (without .sif extension)
-    result_file = SETTINGS.RESULTS_DIR / f"{entity_id}_{task_id}.json"
+    # Save results in the task output directory
+    result_file = task_output_dir / f"{entity_id}_{task_id}_results.json"
     with open(result_file, 'w') as f:
+        json.dump(result_data, f, indent=2)
+    
+    # Also save in main results directory for backwards compatibility
+    main_result_file = SETTINGS.RESULTS_DIR / f"{entity_id}_{task_id}.json"
+    with open(main_result_file, 'w') as f:
         json.dump(result_data, f, indent=2)
 
 

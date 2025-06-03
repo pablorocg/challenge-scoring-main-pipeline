@@ -33,7 +33,7 @@ class BaseTask(ABC):
         pass
     
     @abstractmethod
-    def evaluate(self, output_path: Path) -> Dict[str, Any]:
+    def evaluate(self, output_path: Path, task_output_dir: Path = None) -> Dict[str, Any]:
         """Evaluate task output against ground truth."""
         pass
     

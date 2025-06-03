@@ -58,7 +58,8 @@ class InfarctClassificationTask(BaseTask):
         
         return available_modalities
     
-    def evaluate(self, output_path: Path) -> Dict[str, Any]:
+    def evaluate(self, output_path: Path, task_output_dir: Path = None) -> Dict[str, Any]:
+    
         """Evaluate classification predictions."""
         if not output_path.exists():
             self.logger.error(f"Output file does not exist: {output_path}")
