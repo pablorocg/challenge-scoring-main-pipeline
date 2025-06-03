@@ -108,8 +108,8 @@ class ApptainerRunner:
                 for modality_file, modality in modalities:
                     self.logger.info(f"  🔍 Processing {modality}: {modality_file.name}")
                     
-                    # Create output file for this modality
-                    modality_output = output_path.parent / f"{output_path.stem}_{subject_dir.name}_{modality}{output_path.suffix}"
+                    # Create output file for this modality with proper NIfTI handling
+                    modality_output = self._create_modality_output_path(output_path, subject_dir.name, modality)
                     
                     # Run inference on this file using the instance
                     if self._run_instance_inference(instance_name, modality, modality_file, modality_output):
@@ -124,6 +124,19 @@ class ApptainerRunner:
         except Exception as e:
             self.logger.error(f"Error processing subject {subject_dir.name}: {e}")
             return False
+    
+    def _create_modality_output_path(self, base_output_path: Path, subject_name: str, modality: str) -> Path:
+        """Create proper output path for modality, handling .nii.gz files correctly."""
+        parent_dir = base_output_path.parent
+        
+        # Handle .nii.gz files specially
+        if base_output_path.name.endswith('.nii.gz'):
+            # Remove .nii.gz to get the base name
+            base_name = base_output_path.name[:-7]  # Remove '.nii.gz'
+            return parent_dir / f"{base_name}_{subject_name}_{modality}.nii.gz"
+        else:
+            # For other file types (.csv, etc.), use original logic
+            return parent_dir / f"{base_output_path.stem}_{subject_name}_{modality}{base_output_path.suffix}"
     
     @contextmanager
     def _container_instance(self, container_path: Path, subject_dir: Path, instance_name: str):
