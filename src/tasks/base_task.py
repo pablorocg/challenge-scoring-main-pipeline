@@ -1,5 +1,4 @@
-# src/tasks/base_task.py
-"""Simplified base class for evaluation tasks."""
+"""Base class for evaluation tasks."""
 
 from abc import ABC, abstractmethod
 from pathlib import Path

@@ -1,5 +1,4 @@
-# src/tasks/task3_brain_age.py
-"""Task 3: Brain Age Prediction - Simplified version."""
+"""Task 3: Brain Age Prediction"""
 
 import pandas as pd
 from pathlib import Path

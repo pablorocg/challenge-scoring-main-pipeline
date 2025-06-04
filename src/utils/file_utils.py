@@ -1,17 +1,15 @@
-"""Simplified file handling utilities."""
-
 import shutil
 from pathlib import Path
 from typing import List
 
-from src.config.settings import SETTINGS
+from config.settings import SETTINGS
 
 
 def find_containers(directory: Path) -> List[Path]:
     """Find all .sif container files in directory."""
     if not directory.exists():
         return []
-    
+
     return list(directory.glob("*.sif"))
 
 
@@ -30,10 +28,8 @@ def ensure_directories():
         SETTINGS.RESULTS_DIR,
         SETTINGS.INPUT_DIR,
         SETTINGS.OUTPUT_DIR,
-        SETTINGS.LOGS_DIR
+        SETTINGS.LOGS_DIR,
     ]
-    
+
     for directory in directories:
         directory.mkdir(parents=True, exist_ok=True)
-
-
