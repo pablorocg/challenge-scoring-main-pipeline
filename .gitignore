@@ -1,56 +1,33 @@
-logs/*
-data/*
-info.md
+# FOMO Evaluation System - Simplified .gitignore
 
+# Data and results
+data/
+logs/
+results/
+output/
+submissions/
+input/
+*.nii.gz
+*.sif
+dev_tools/
+
+# Configuration
+.env
 
 # Python
 __pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-pip-wheel-metadata/
-share/python-wheels/
+*.pyc
+*.pyo
 *.egg-info/
-.installed.cfg
-*.egg
+dist/
+build/
 
 # Virtual environments
 venv/
 env/
-ENV/
 
 # IDE
 .vscode/
 .idea/
 *.swp
-*.swo
-
-# Configuration files (contains sensitive data)
-.env
-
-# Logs
-logs/
-*.log
-
-# Results
-results/
-output/
-
-# Data
-submissions/
-input/
-*.nii.gz
-*.sif
+info.md
